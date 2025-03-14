@@ -1,0 +1,115 @@
+#!/bin/bash
+
+# 🌟 Проверка зависимости: Git
+if ! command -v git &>/dev/null; then
+  echo "❌ Git не установлен. Установи его: sudo apt install git"
+  exit 1
+fi
+
+# 📂 Текущая папка
+current_dir=$(basename "$PWD")
+echo "📁 Текущая папка: $current_dir"
+
+read -p "🔤 Введите имя репозитория (по умолчанию: $current_dir): " repo
+repo=${repo:-$current_dir}
+
+# 🔀 GitHub или GitLab
+echo "🌐 Где создать репозиторий?"
+echo "1) GitHub"
+echo "2) GitLab"
+read -p "Выберите (1/2, по умолчанию: 1): " platform_choice
+platform_choice=${platform_choice:-1}
+platform=$([[ "$platform_choice" == "2" ]] && echo "gitlab" || echo "github")
+
+# 🔒 Публичный или приватный
+echo "🔐 Тип репозитория:"
+echo "1) Публичный"
+echo "2) Приватный"
+read -p "Выберите (1/2, по умолчанию: 1): " vis_choice
+vis_choice=${vis_choice:-1}
+visibility=$([[ "$vis_choice" == "2" ]] && echo "private" || echo "public")
+
+# 🛠️ Git init
+if [ ! -d .git ]; then
+  git init
+  git checkout -b main
+else
+  echo "🔁 Git уже инициализирован."
+  git checkout main 2>/dev/null || git checkout -b main
+fi
+
+# README
+[ ! -f README.md ] && echo "# $repo" > README.md && echo "📄 README.md создан."
+
+# .gitignore
+if [ ! -f .gitignore ]; then
+  echo "🤖 Определяем тип проекта..."
+  if ls *.tf &>/dev/null || [ -f main.tf ]; then template="terraform"
+  elif [ -f package.json ]; then template="node"
+  elif ls *.py &>/dev/null || [ -f requirements.txt ] || [ -d .venv ]; then template="python"
+  elif ls *.java &>/dev/null || [ -f pom.xml ] || [ -f build.gradle ]; then template="java"
+  else template="none"; fi
+
+  case $template in
+    python) echo -e "__pycache__/\n*.py[cod]\n*.egg-info/\n.env\n.venv" > .gitignore ;;
+    node) echo -e "node_modules/\ndist/\n.env\nnpm-debug.log" > .gitignore ;;
+    java) echo -e "*.class\n*.jar\n*.war\n*.log\ntarget/" > .gitignore ;;
+    terraform) echo -e ".terraform/\n*.tfstate\n*.backup\ncrash.log" > .gitignore ;;
+    none) touch .gitignore ;;
+  esac
+  echo "✅ .gitignore создан для: $template"
+fi
+
+# Git add + commit
+git add .
+if git diff --cached --quiet; then
+  echo "⚠️ Нет изменений для коммита."
+else
+  git commit -m "Initial commit"
+fi
+
+# ▶️ Создание репозитория
+if [[ "$platform" == "gitlab" ]]; then
+  if [ -z "$GITLAB_TOKEN" ]; then
+    echo "❌ Переменная GITLAB_TOKEN не установлена. Установи её: export GITLAB_TOKEN=your_token"
+    exit 1
+  fi
+
+  echo "📡 Создаём репозиторий на GitLab..."
+  response=$(curl -s --header "PRIVATE-TOKEN: $GITLAB_TOKEN"     --data "name=$repo&visibility=$visibility" https://gitlab.com/api/v4/projects)
+  git_url=$(echo "$response" | grep -oP '"ssh_url_to_repo":"\K[^"]+')
+  if [ -z "$git_url" ]; then echo "❌ Ошибка создания репозитория на GitLab:"; echo "$response"; exit 1; fi
+  git remote get-url origin &>/dev/null || git remote add origin "$git_url"
+  git push -u origin main
+  echo "✅ Репозиторий создан: $git_url"
+
+else
+  if ! command -v gh &>/dev/null; then
+    echo "🛠️ GitHub CLI (gh) не найден. Устанавливаем..."
+    sudo apt update && sudo apt install -y gh
+  fi
+  if ! gh auth status &>/dev/null; then
+    echo "🔐 GitHub CLI не авторизован. Выполни: gh auth login"
+    exit 1
+  fi
+  echo "🌐 Создаём репозиторий на GitHub..."
+  gh repo create "$repo" --source=. --$visibility --push
+  user=$(gh auth status --show-token 2>/dev/null | grep -oP '(?<=as ).*')
+  echo "✅ Репозиторий: https://github.com/${user:-your-username}/$repo"
+fi
+
+# Добавление в автослежение
+grep -qxF "$PWD" ~/.repo-autosync.list 2>/dev/null || echo "$PWD" >> ~/.repo-autosync.list
+echo "📝 Папка $PWD добавлена в авто-слежение."
+
+# 🕑 Установка задачи в crontab
+echo "🕒 Хотите включить автоматическую синхронизацию?"
+read -p "Введите интервал в минутах (или 0 — не добавлять в cron, по умолчанию: 1): " cron_interval
+cron_interval=${cron_interval:-1}
+
+if [[ "$cron_interval" =~ ^[1-9][0-9]*$ ]]; then
+  (crontab -l 2>/dev/null; echo "*/$cron_interval * * * * /usr/local/bin/update-all.sh") | sort -u | crontab -
+  echo "✅ Задача добавлена в cron: каждые $cron_interval мин"
+else
+  echo "🚫 Автосинхронизация не добавлена."
+fi
